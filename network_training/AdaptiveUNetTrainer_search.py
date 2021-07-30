@@ -1,4 +1,3 @@
-# 3/26增加Tensorboard记录
 import torch
 from nnunet.network_architecture.initialization import InitWeights_He
 from nnunet.training.network_training.nnUNetTrainerV2 import nnUNetTrainerV2
