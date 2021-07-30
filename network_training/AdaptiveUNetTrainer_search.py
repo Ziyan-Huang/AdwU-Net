@@ -27,6 +27,7 @@ import torch.backends.cudnn as cudnn
 from sklearn.model_selection import KFold
 
 from torch.utils.tensorboard import SummaryWriter
+import datetime
 
 
 class AdaptiveUNetTrainer_search(nnUNetTrainerV2):
@@ -39,18 +40,19 @@ class AdaptiveUNetTrainer_search(nnUNetTrainerV2):
         self.max_num_epochs = 250
         self.begin_search_epoch = 100
         self.initial_lr_w = 1e-2
-        self.initial_lr_a = 1e-3
+        self.initial_lr_a = 4e-4
         self.trA_percent = 0.5
         self.weight_decay_a = 0
-        self.initial_tau = 10
+        self.initial_tau = 5
         self.tau_anneal_rate = 0.97
         self.tau = self.initial_tau
 
         # 增加结构one-hot限制loss
         self.lamb = 0 
-        self.arch_constraint_loss = ArchConstraintLoss()
+        self.arch_constraint_loss = ArchConstraintLoss(10000, 0.5)
 
-        self.writer = SummaryWriter(join(self.output_folder, "logs"))
+        dt = datetime.datetime.now().strftime("%m-%d-%I-%M%p")
+        self.writer = SummaryWriter(join(self.output_folder, "logs", dt))
 
         # 搜索程序跑的慢，保存checkpoint频率高一点
         self.save_every = 20
@@ -76,12 +78,6 @@ class AdaptiveUNetTrainer_search(nnUNetTrainerV2):
             self.process_plans(self.plans)
 
             self.setup_DA_params()
-
-            # 更改，num_thread以及cached，原参数为12和2
-            # self.data_aug_params["num_threads"] = 12
-            # self.data_aug_params["num_cached_per_thread"] = 2
-            self.data_aug_params["num_threads"] = 2
-            self.data_aug_params["num_cached_per_thread"] = 1
 
             ################# Here we wrap the loss for deep supervision ############
             # we need to know the number of outputs of the network
@@ -315,7 +311,10 @@ class AdaptiveUNetTrainer_search(nnUNetTrainerV2):
                 loss_w = self.run_iteration(self.trB_gen, self.optimizer_w, True)
                 weight_losses_epoch.append(loss_w)
 
-            self.print_current_arch()
+            # 打印结构并且存储在tensorboard中，各搜索函数中独立实现
+            if self.epoch >= self.begin_search_epoch:
+                self.print_current_arch()
+
             self.all_tr_losses.append(np.mean(weight_losses_epoch))
             self.print_to_log_file("Train weight loss: %.4f" % self.all_tr_losses[-1])
             # 存在Tensorboard中
@@ -349,7 +348,9 @@ class AdaptiveUNetTrainer_search(nnUNetTrainerV2):
 
         self.epoch -= 1  # if we don't do this we can get a problem with loading model_final_checkpoint.
 
-        if self.save_final_checkpoint: self.save_checkpoint(join(self.output_folder, "model_final_checkpoint.model"))
+        # if self.save_final_checkpoint: self.save_checkpoint(join(self.output_folder, "model_final_checkpoint.model"))
+        # 注释掉搜索阶段最终模型的保存
+
         # now we can delete latest as it will be identical with final
         if isfile(join(self.output_folder, "model_latest.model")):
             os.remove(join(self.output_folder, "model_latest.model"))
@@ -426,7 +427,7 @@ class AdaptiveUNetTrainer_search(nnUNetTrainerV2):
 
     def forward_out_and_loss(self, data, target):
         output = self.network(data, self.tau)
-        l = self.loss(output, target) + self.lamb * self.arch_constraint_loss(self.network.arch_parameters())
+        l = self.loss(output, target) # + self.lamb * (self.epoch/self.max_num_epochs) * self.arch_constraint_loss(self.network.VRAM_estimate(self.patch_size))
         return output, l
 
 
@@ -576,19 +577,10 @@ class AdaptiveUNetTrainer_search(nnUNetTrainerV2):
 
 
 class ArchConstraintLoss(nn.Module):
-
     # 将每组结构参数与它相应的one-hot形式，进行L1 Norm
-    def __init__(self):
-
+    def __init__(self, target_vram, sigma):
         super(ArchConstraintLoss, self).__init__()
-    
-    def forward(self, arch_parameters):
-        arch_constarint_loss = []
-        for param in arch_parameters:
-            param = F.softmax(param, dim=-1)
-            will_param = torch.eye(len(param))[torch.argmax(param)]
-            will_param = to_cuda(will_param)
-            arch_constarint_loss.append(sum(torch.abs(param-will_param)))
-
-        # 返回结构约束loss值范围在0-2之间
-        return sum(arch_constarint_loss) / len(arch_constarint_loss)
+        self.target_vram = target_vram
+        self.sigma = sigma
+    def forward(self, estimate_vram):
+        return torch.abs(estimate_vram / self.target_vram - self.sigma)
