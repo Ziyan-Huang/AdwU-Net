@@ -4,20 +4,16 @@ import numpy as np
 from nnunet.network_architecture.initialization import InitWeights_He
 from nnunet.network_architecture.neural_network import SegmentationNetwork
 from nnunet.network_architecture.adaptive_UNet_blocks import ConvDropoutNormNonlin, StackedConvLayers2
+import torch.nn.functional
 
 
-class AdwUNet(SegmentationNetwork):
+class AwUNet(SegmentationNetwork):
 
-    def __init__(self, input_channels, num_classes, num_pool, arch_list,
+    def __init__(self, input_channels, num_classes, num_pool, channels_per_stages,
                  pool_op_kernel_sizes=None,
                  conv_kernel_sizes=None):
-        assert len(arch_list) == num_pool * 2 + 1
-        super(AdwUNet, self).__init__()
-
-        self.input_channels = input_channels
-        self.num_classes = self.num_classes
-        self.num_pool = num_pool
-        self.arch_list = arch_list
+        assert len(channels_per_stages) == num_pool * 2 + 1
+        super(AwUNet, self).__init__()
 
         basic_block = ConvDropoutNormNonlin
 
@@ -67,13 +63,12 @@ class AdwUNet(SegmentationNetwork):
             self.conv_kwargs['kernel_size'] = self.conv_kernel_sizes[d]
             self.conv_kwargs['padding'] = self.conv_pad_sizes[d]
 
-            # StackedConvLayers2   arch_list[d]
-            self.conv_blocks_context.append(StackedConvLayers2(input_features, arch_list[d],
-                                                                      self.conv_op, self.conv_kwargs, self.norm_op, self.norm_op_kwargs,
-                                                                      self.dropout_op, self.dropout_op_kwargs, self.nonlin, self.nonlin_kwargs,
-                                                                      first_stride, basic_block=basic_block))
+            self.conv_blocks_context.append(StackedConvLayers2(input_features, channels_per_stages[d],
+                                                                self.conv_op, self.conv_kwargs, self.norm_op, self.norm_op_kwargs,
+                                                                self.dropout_op, self.dropout_op_kwargs, self.nonlin, self.nonlin_kwargs,
+                                                                first_stride, basic_block=basic_block))
             
-            input_features = arch_list[d][-1]
+            input_features = channels_per_stages[d][-1]
         
         final_num_features = input_features
 
@@ -90,10 +85,10 @@ class AdwUNet(SegmentationNetwork):
             self.conv_kwargs['kernel_size'] = self.conv_kernel_sizes[- (u + 2)]
             self.conv_kwargs['padding'] = self.conv_pad_sizes[- (u + 2)]
 
-            self.conv_blocks_localization.append(StackedConvLayers2(n_features_after_tu_and_concat, arch_list[num_pool+1+u], 
-                                                                           self.conv_op, self.conv_kwargs, self.norm_op, self.norm_op_kwargs,
-                                                                           self.dropout_op, self.dropout_op_kwargs, self.nonlin, self.nonlin_kwargs,
-                                                                           first_stride=None, basic_block=basic_block))
+            self.conv_blocks_localization.append(StackedConvLayers2(n_features_after_tu_and_concat, channels_per_stages[num_pool+1+u], 
+                                                                    self.conv_op, self.conv_kwargs, self.norm_op, self.norm_op_kwargs,
+                                                                    self.dropout_op, self.dropout_op_kwargs, self.nonlin, self.nonlin_kwargs,
+                                                                    first_stride=None, basic_block=basic_block)) 
 
             final_num_features = self.conv_blocks_localization[-1].output_channels
 
@@ -133,3 +128,5 @@ class AdwUNet(SegmentationNetwork):
                                               zip(list(self.upscale_logits_ops)[::-1], seg_outputs[:-1][::-1])])
         else:
             return seg_outputs[-1]
+
+    

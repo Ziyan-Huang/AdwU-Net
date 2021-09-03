@@ -1,10 +1,7 @@
 # Adaptive depth and width U-Net for search
-# 可以同时调整网络深度和宽度的网络结构
 
-from copy import deepcopy
 import torch
 from torch import nn
-import torch.nn.functional as F
 import numpy as np
 from nnunet.network_architecture.initialization import InitWeights_He
 from nnunet.network_architecture.neural_network import SegmentationNetwork
@@ -116,7 +113,6 @@ class AdwUNet_search(SegmentationNetwork):
             self.upscale_logits_ops.append(lambda x: x)
         
         # register all modules properly
-        # 修改了原始的数据，先注册下采样路，再注册上采样路
         self.conv_blocks_context = nn.ModuleList(self.conv_blocks_context)
         self.conv_blocks_localization = nn.ModuleList(self.conv_blocks_localization)
         self.tu = nn.ModuleList(self.tu)
@@ -158,52 +154,3 @@ class AdwUNet_search(SegmentationNetwork):
             if not (k.endswith('alphas') or k.endswith('betas')):
                 _weight_parameters.append(v)
         return _weight_parameters
-
-    
-    def VRAM_estimate(self, patch_size):
-        # 为简便，先仅计算feature map的占用，忽略参数占用
-
-        depth_params = []
-        width_params = []
-        for param in self.arch_parameters():
-            if len(param) == self.max_num_convs:
-                depth_params.append(F.softmax(param, dim=-1))
-            else:
-                width_params.append(F.softmax(param, dim=-1))
-        
-        # 先将宽度结构变量转成等效宽度
-        stage = 0
-        equal_arch_list = []
-        for i in range(len(depth_params)):
-            stage = i if i <= len(depth_params) // 2 else len(depth_params) - i - 1
-            stage = min(stage, 3)
-            channel_gap = 8 * 2 ** stage
-            min_channel = channel_gap * 2
-
-            equal_channels = []
-            for j in range(self.max_num_convs):
-                equal_channels.append(0)
-                for k in range(5):
-                    equal_channels[-1] += width_params[i*self.max_num_convs+j][k] * (min_channel + k * channel_gap)
-            equal_arch_list.append(equal_channels)
-
-        # 计算每个深度结构变量对应的显存
-        map_size = patch_size.copy()
-        tmp = 0
-        pool_op_kernel_sizes = np.array(self.pool_op_kernel_sizes)
-        tmp += self.input_channels * np.prod(map_size)
-
-        for i in range(len(self.pool_op_kernel_sizes)):
-            for j in range(self.max_num_convs):
-                for k in range(j+1):
-                    tmp += equal_arch_list[i][k] * np.prod(map_size) * depth_params[i][j]
-                    tmp += equal_arch_list[-i-1][k] * np.prod(map_size) * depth_params[-i-1][j]
-                tmp += equal_arch_list[i][j] * np.prod(map_size) *depth_params[i][j]
-
-            map_size //= pool_op_kernel_sizes[i]
-
-        for j in range(self.max_num_convs):
-            for k in range(j+1):
-                tmp += equal_arch_list[len(self.pool_op_kernel_sizes)][k] * np.prod(map_size) * depth_params[len(self.pool_op_kernel_sizes)][j]
-
-        return tmp*2/256/1024
