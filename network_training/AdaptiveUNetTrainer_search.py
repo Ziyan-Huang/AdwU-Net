@@ -1,32 +1,24 @@
 import torch
-from nnunet.network_architecture.initialization import InitWeights_He
 from nnunet.training.network_training.nnUNetTrainerV2 import nnUNetTrainerV2
-from nnunet.utilities.nd_softmax import softmax_helper
 from torch import nn
 import torch.nn.functional as F
 from nnunet.training.loss_functions.deep_supervision import MultipleOutputLoss2
 from nnunet.training.data_augmentation.data_augmentation_moreDA import get_moreDA_augmentation
 from nnunet.network_architecture.neural_network import SegmentationNetwork
-
 from collections import OrderedDict
 
 import numpy as np
 from nnunet.utilities.to_torch import maybe_to_torch, to_cuda
-from nnunet.training.data_augmentation.default_data_augmentation import default_2D_augmentation_params, \
-    get_patch_size, default_3D_augmentation_params
-from nnunet.training.dataloading.dataset_loading import load_dataset, DataLoader3D, DataLoader2D, unpack_dataset
+
+from nnunet.training.dataloading.dataset_loading import  DataLoader3D, unpack_dataset
 from torch.cuda.amp import autocast
 from nnunet.training.learning_rate.poly_lr import poly_lr
 from batchgenerators.utilities.file_and_folder_operations import *
 from _warnings import warn
 from torch.optim.lr_scheduler import _LRScheduler
 from time import time
-from torch.optim import lr_scheduler
 import torch.backends.cudnn as cudnn
 from sklearn.model_selection import KFold
-
-from torch.utils.tensorboard import SummaryWriter
-import datetime
 
 
 class AdaptiveUNetTrainer_search(nnUNetTrainerV2):
@@ -46,27 +38,14 @@ class AdaptiveUNetTrainer_search(nnUNetTrainerV2):
         self.tau_anneal_rate = 0.97
         self.tau = self.initial_tau
 
-        # 增加结构one-hot限制loss
-        self.lamb = 0 
-        self.arch_constraint_loss = ArchConstraintLoss(10000, 0.5)
-
-        dt = datetime.datetime.now().strftime("%m-%d-%I-%M%p")
-        self.writer = SummaryWriter(join(self.output_folder, "logs", dt))
-
-        # 搜索程序跑的慢，保存checkpoint频率高一点
-        self.save_every = 20
-
-
     def initialize(self, training=True, force_load_plans=False):
         
-        # 打印本次程序使用的超参数
         self.print_to_log_file("max_num_epochs: %d" % self.max_num_epochs)
         self.print_to_log_file("begin_search_epoch: %d" % self.begin_search_epoch)
         self.print_to_log_file("trA_percent: %.2f" % self.trA_percent)
         self.print_to_log_file("weight_decay_a: %f" % self.weight_decay_a)
         self.print_to_log_file("initial tau: %d" % self.initial_tau)
         self.print_to_log_file("tau_anneal_rate: %.2f" % self.tau_anneal_rate)
-        self.print_to_log_file("arch_loss_lambda: %e" % self.lamb)
 
         if not self.was_initialized:
             maybe_mkdir_p(self.output_folder)
@@ -108,7 +87,7 @@ class AdaptiveUNetTrainer_search(nnUNetTrainerV2):
                         "INFO: Not unpacking data! Training may be slow due to that. Pray you are not using 2d or you "
                         "will wait all winter for your model to finish!")
 
-                # 将这一段重复两遍即可？
+                # trA_gen
                 self.trA_gen, self.val_gen = get_moreDA_augmentation(
                     self.dl_trA, self.dl_val,
                     self.data_aug_params[
@@ -118,6 +97,7 @@ class AdaptiveUNetTrainer_search(nnUNetTrainerV2):
                     pin_memory=self.pin_memory,
                     use_nondetMultiThreadedAugmenter=False
                 )
+                # trB_gen
                 self.trB_gen, self.val_gen = get_moreDA_augmentation(
                     self.dl_trB, self.dl_val,
                     self.data_aug_params[
@@ -154,7 +134,6 @@ class AdaptiveUNetTrainer_search(nnUNetTrainerV2):
                                          momentum=0.99, nesterov=True)
         self.optimizer_a = torch.optim.Adam(self.network.arch_parameters(), self.initial_lr_a, weight_decay=self.weight_decay_a)
         self.optimizer = self.optimizer_w
-        # 没有用到
         self.lr_scheduler = None
 
 
@@ -168,6 +147,7 @@ class AdaptiveUNetTrainer_search(nnUNetTrainerV2):
         dl_trB = DataLoader3D(self.dataset_trB, self.basic_generator_patch_size, self.patch_size, self.batch_size,
                                  False, oversample_foreground_percent=self.oversample_foreground_percent,
                                  pad_mode="constant", pad_sides=self.pad_all_sides, memmap_mode='r')
+
         dl_val = DataLoader3D(self.dataset_val, self.patch_size, self.patch_size, self.batch_size, False,
                                   oversample_foreground_percent=self.oversample_foreground_percent,
                                   pad_mode="constant", pad_sides=self.pad_all_sides, memmap_mode='r')
@@ -214,7 +194,8 @@ class AdaptiveUNetTrainer_search(nnUNetTrainerV2):
 
         tr_keys.sort()
         val_keys.sort()
-        # 开始修改
+
+        # split the original training set into trainA and trainB
         self.dataset_trA = OrderedDict()
         self.dataset_trB = OrderedDict()
         self.dataset_val = OrderedDict()
@@ -293,7 +274,7 @@ class AdaptiveUNetTrainer_search(nnUNetTrainerV2):
 
             for _ in range(self.num_batches_per_epoch):
                 # MiLeNAS
-                # 训练结构参数，使用全部训练数据
+                # train arch parameters using both of trainA and trainB
                 if self.epoch >= self.begin_search_epoch:
                     for param in self.network.weight_parameters():
                         param.requires_grad = False
@@ -302,7 +283,7 @@ class AdaptiveUNetTrainer_search(nnUNetTrainerV2):
                     _ = self.run_iteration(self.trA_gen, self.optimizer_a, True)
                     _ = self.run_iteration(self.trB_gen, self.optimizer_a, True)
 
-                # 训练模型参数，使用trainB
+                # train network weight using only trainB
                 for param in self.network.weight_parameters():
                     param.requires_grad = True
                 for param in self.network.arch_parameters():
@@ -310,27 +291,22 @@ class AdaptiveUNetTrainer_search(nnUNetTrainerV2):
                 loss_w = self.run_iteration(self.trB_gen, self.optimizer_w, True)
                 weight_losses_epoch.append(loss_w)
 
-            # 打印结构并且存储在tensorboard中，各搜索函数中独立实现
             if self.epoch >= self.begin_search_epoch:
                 self.print_current_arch()
 
             self.all_tr_losses.append(np.mean(weight_losses_epoch))
             self.print_to_log_file("Train weight loss: %.4f" % self.all_tr_losses[-1])
-            # 存在Tensorboard中
-            self.writer.add_scalar('Loss/train', self.all_tr_losses[-1], self.epoch)
+            
             
             with torch.no_grad():
                 # validation with train=False
                 self.network.eval()
                 val_losses = []
                 for b in range(self.num_val_batches_per_epoch):
-                    l = self.run_iteration(self.val_gen, self.optimizer_w, False, True)   # 此处optimizer没有用到
+                    l = self.run_iteration(self.val_gen, self.optimizer_w, False, True) 
                     val_losses.append(l)
                 self.all_val_losses.append(np.mean(val_losses))
                 self.print_to_log_file("Validation loss: %.4f" % self.all_val_losses[-1])
-                # 记录在Tensorboard
-                self.writer.add_scalar('Loss/val', self.all_val_losses[-1], self.epoch)
-                # 去掉also_val_in_train的选择
 
             self.update_train_loss_MA()  # needed for lr scheduler and stopping of training
 
@@ -347,14 +323,13 @@ class AdaptiveUNetTrainer_search(nnUNetTrainerV2):
 
         self.epoch -= 1  # if we don't do this we can get a problem with loading model_final_checkpoint.
 
-        # if self.save_final_checkpoint: self.save_checkpoint(join(self.output_folder, "model_final_checkpoint.model"))
-        # 注释掉搜索阶段最终模型的保存
-
         # now we can delete latest as it will be identical with final
         if isfile(join(self.output_folder, "model_latest.model")):
             os.remove(join(self.output_folder, "model_latest.model"))
         if isfile(join(self.output_folder, "model_latest.model.pkl")):
             os.remove(join(self.output_folder, "model_latest.model.pkl"))
+
+        # we don't save the final model as we only need the argmax value of architecture parameters
 
         self.network.do_ds = ds
     
@@ -370,9 +345,7 @@ class AdaptiveUNetTrainer_search(nnUNetTrainerV2):
             # self.writer.add_histogram('Arch Distribution %d'%(stage), param, self.epoch)
             arch_code.append(np.argmax(param)+1)
             self.print_to_log_file(' '.join(['{:.6f}'.format(p) for p in param]))
-        self.print_to_log_file('Current arch:', arch_code) 
-
-        
+        self.print_to_log_file('Current arch:', arch_code)
 
     def run_iteration(self, data_generator, optimizer, do_backprop=True, run_online_evaluation=False):
         """
@@ -398,9 +371,9 @@ class AdaptiveUNetTrainer_search(nnUNetTrainerV2):
 
         if self.fp16:
             with autocast():
-                # 前向传播
-                output, l = self.forward_out_and_loss(data, target)
+                output = self.network(data, self.tau)
                 del data
+                l = self.loss(output, target)
 
             if do_backprop:
                 self.amp_grad_scaler.scale(l).backward()
@@ -409,8 +382,9 @@ class AdaptiveUNetTrainer_search(nnUNetTrainerV2):
                 self.amp_grad_scaler.step(optimizer)
                 self.amp_grad_scaler.update()
         else:
-            output, l = self.forward_out_and_loss(data, target)
+            output = self.network(data, self.tau)
             del data
+            l = self.loss(output, target)
 
             if do_backprop:
                 l.backward()
@@ -424,13 +398,6 @@ class AdaptiveUNetTrainer_search(nnUNetTrainerV2):
 
         return l.detach().cpu().numpy()
 
-    def forward_out_and_loss(self, data, target):
-        output = self.network(data, self.tau)
-        l = self.loss(output, target) # + self.lamb * (self.epoch/self.max_num_epochs) * self.arch_constraint_loss(self.network.VRAM_estimate(self.patch_size))
-        return output, l
-
-
-    # 将原始一个optimizer的学习率改为两个optimizer的学习率变动，加上tau的衰减
     def maybe_update_lr(self, epoch=None):
         """
         if epoch is not None we overwrite epoch. Else we use epoch = self.epoch + 1
@@ -455,7 +422,6 @@ class AdaptiveUNetTrainer_search(nnUNetTrainerV2):
         self.print_to_log_file("tau", np.round(self.tau, decimals=6))
 
 
-    # 模型的保存和加载，对于optimizer都要改成optimizer_a和optimizer_w
     def save_checkpoint(self, fname, save_optimizer=True):
         start_time = time()
         state_dict = self.network.state_dict()
@@ -559,27 +525,5 @@ class AdaptiveUNetTrainer_search(nnUNetTrainerV2):
     def manage_patience(self):
         # update patience
         continue_training = True
-        
-        # 搜索程序不需要保存checkpoints
-        # if self.best_val_eval_criterion_MA is None:
-        #     self.best_val_eval_criterion_MA = self.val_eval_criterion_MA 
-
-        # if self.val_eval_criterion_MA > self.best_val_eval_criterion_MA:
-        #     self.best_val_eval_criterion_MA = self.val_eval_criterion_MA
-        #     self.print_to_log_file("saving best epoch checkpoint...")
-        #     self.save_checkpoint(join(self.output_folder, "model_best.model"))
-
-        #     if not self.save_latest_only:
-        #         self.save_checkpoint(join(self.output_folder, "model_ep_%03.0d_best.model" % (self.epoch + 1)))
-
+        # we don't save best checkpoint in the search stage
         return continue_training
-
-
-class ArchConstraintLoss(nn.Module):
-    # 将每组结构参数与它相应的one-hot形式，进行L1 Norm
-    def __init__(self, target_vram, sigma):
-        super(ArchConstraintLoss, self).__init__()
-        self.target_vram = target_vram
-        self.sigma = sigma
-    def forward(self, estimate_vram):
-        return torch.abs(estimate_vram / self.target_vram - self.sigma)

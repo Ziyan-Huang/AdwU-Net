@@ -1,5 +1,3 @@
-# 让所有重训练程序从该文件继承，避免对nnUNetTrainerV2直接修改
-
 from nnunet.training.network_training.nnUNetTrainerV2 import nnUNetTrainerV2
 from batchgenerators.utilities.file_and_folder_operations import join
 
