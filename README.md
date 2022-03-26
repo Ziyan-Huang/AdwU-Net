@@ -1,5 +1,5 @@
 # AdwU-Net: Adaptive depth and Width U-Net
-Built upon [MIC-DKFZ/nnUNet](https://github.com/MIC-DKFZ/nnUNet), this repository provides the official PyTorch implementation of [AdwU-Net: Adaptive depth and width U-Net for medical image segmentation](https://openreview.net/forum?id=kF-d1SKWJpS).
+Built upon [MIC-DKFZ/nnUNet](https://github.com/MIC-DKFZ/nnUNet), this repository provides the official PyTorch implementation of [AdwU-Net: Adaptive Depth and Width U-Net for Medical Image Segmentation by Differentiable Neural Architecture Search](https://openreview.net/forum?id=kF-d1SKWJpS).
 
 ## Environments and Requirements:
 1.Install nnU-Net as below. You should meet the requirements of nnUNet, our method does not need any additional requirements.  For more details, please refer to https://github.com/MIC-DKFZ/nnUNet
