@@ -24,6 +24,10 @@ cp network_architecture/* nnunet/network_architecture/
 cp run_searching.py nnunet/run/
 ```
 
+## Dataset and Preprocessing
+The training data is from the [MSD (Medical Segmentation Decathlon)](http://medicaldecathlon.com/) challenge.
+After downloading the data, use scripts ``nnUNet_convert_decathlon_task`` and ``nnUNet_plan_and_preprocess`` provided by nnUNet to preprocess the data. For more details, please refer to the repository of nnUNet.
+
 ## How to use AdwU-Net
 For example, we search the optimal depth and width of Task005_Prostate and then configure the optimal depth and width of nnUNet to train the model.
 * Run the following command to search the optimal depth and width on Task005_Prostate
